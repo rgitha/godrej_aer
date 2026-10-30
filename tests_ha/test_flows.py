@@ -466,6 +466,7 @@ async def test_health_entities(hass):
 
     # A status reply arrives: OK, with the time as an attribute.
     from test_devicestatus_frame import FRAME
+    instance.schedules = []  # known: no startup schedule read in this test
     instance._on_notification(C1, FRAME)
     await hass.async_block_till_done()
     status = hass.states.get(status_id)
@@ -657,6 +658,117 @@ async def test_failed_poll_retries_when_the_backoff_ends(hass):
             assert connect.await_count == 2  # not a minute later
 
 
+# --- schedules ---------------------------------------------------------------
+
+def _sched(days, start, end, interval):
+    from datetime import time as dtime
+    from custom_components.godrej_aer.godrej.schedule import Schedule
+
+    h1, m1 = map(int, start.split(":"))
+    h2, m2 = map(int, end.split(":"))
+    return Schedule.create(days, dtime(h1, m1), dtime(h2, m2), interval)
+
+
+async def test_schedules_sensor_lists_what_the_device_holds(hass):
+    from custom_components.godrej_aer.godrej.events import DEVICE_SCHEDULES_UPDATE
+
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data
+    assert hass.states.get("sensor.hall_schedules").state == "unknown"
+
+    instance.schedules = [_sched("daily", "08:00", "22:30", 40),
+                          _sched(["sat", "sun"], "10:00", "12:00", 20)]
+    instance.eventbus.send(DEVICE_SCHEDULES_UPDATE, instance)
+    await hass.async_block_till_done()
+    state = hass.states.get("sensor.hall_schedules")
+    assert state.state == "2"
+    assert state.attributes["friendly_name"] == "Hall Schedules"
+    assert state.attributes["schedules"] == [
+        {"number": 1, "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+         "start": "08:00", "end": "22:00", "interval": 40},
+        {"number": 2, "days": ["Sat", "Sun"], "start": "10:00", "end": "12:00", "interval": 20},
+    ]
+
+
+async def test_schedules_are_read_once_after_the_first_status(hass):
+    from custom_components.godrej_aer.godrej.godrej import SmartMatic
+    from test_devicestatus_frame import FRAME
+
+    entry = make_entry(hass)
+    with patch.object(SmartMatic, "read_schedules", AsyncMock(return_value=[])) as read:
+        await setup_entry(hass, entry)
+        instance = entry.runtime_data
+        read.assert_not_awaited()
+        instance._on_notification(C1, FRAME)
+        await hass.async_block_till_done()
+        read.assert_awaited_once()
+        instance.schedules = []
+        instance._on_notification(C1, FRAME)
+        await hass.async_block_till_done()
+        read.assert_awaited_once()
+
+
+async def test_schedule_actions(hass):
+    from homeassistant.exceptions import ServiceValidationError
+
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data
+
+    with patch.object(instance, "add_schedule", AsyncMock(return_value=[])) as add:
+        await hass.services.async_call(DOMAIN, "add_schedule", {
+            "days": ["mon", "fri"], "start": "07:00", "end": "14:00", "interval": "10",
+        }, blocking=True)
+    add.assert_awaited_once_with(_sched(["mon", "fri"], "07:00", "14:00", 10))
+
+    with patch.object(instance, "set_schedules", AsyncMock(return_value=[])) as set_:
+        await hass.services.async_call(DOMAIN, "set_schedules", {"schedules": [
+            {"days": "daily", "start": "08:00", "end": "22:30", "interval": 40},
+            {"days": ["sat"], "start": "06:00", "end": "07:00", "interval": 20},
+        ]}, blocking=True)
+        set_.assert_awaited_once_with([
+            _sched("daily", "08:00", "22:30", 40), _sched(["sat"], "06:00", "07:00", 20),
+        ])
+        set_.reset_mock()
+        await hass.services.async_call(DOMAIN, "clear_schedules", {}, blocking=True)
+        set_.assert_awaited_once_with([])
+
+    with patch.object(instance, "remove_schedule", AsyncMock(return_value=[])) as remove:
+        await hass.services.async_call(DOMAIN, "remove_schedule", {"number": 2}, blocking=True)
+    remove.assert_awaited_once_with(2)
+
+    # Impossible schedules are refused before anything is sent.
+    with pytest.raises(ServiceValidationError, match="later than the start"):
+        await hass.services.async_call(DOMAIN, "add_schedule", {
+            "days": ["mon"], "start": "14:00", "end": "07:00", "interval": "10",
+        }, blocking=True)
+
+
+async def test_schedule_action_reports_device_failures(hass):
+    from homeassistant.exceptions import HomeAssistantError
+    from custom_components.godrej_aer.godrej.exception import CommandNotConfirmed
+
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data
+    with patch.object(instance, "set_schedules", AsyncMock(side_effect=CommandNotConfirmed("x"))):
+        with pytest.raises(HomeAssistantError) as err:
+            await hass.services.async_call(DOMAIN, "clear_schedules", {}, blocking=True)
+    assert err.value.translation_key == "command_not_confirmed"
+
+
+async def test_update_status_also_reads_schedules(hass):
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data
+    with patch.object(instance, "connect", AsyncMock(return_value=True)) as connect, \
+         patch.object(instance, "read_schedules", AsyncMock(return_value=[])) as read:
+        await hass.services.async_call(DOMAIN, "update_status", {}, blocking=True)
+    connect.assert_awaited_once()
+    read.assert_awaited_once()
+
+
 async def test_actions_use_the_current_target_helper(hass, caplog):
     """HA 2026.10 removed the old (hass, call) form; it used to log a warning."""
     from homeassistant.helpers import device_registry as dr
@@ -665,7 +777,8 @@ async def test_actions_use_the_current_target_helper(hass, caplog):
     await setup_entry(hass, entry)
     device = dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)[0]
     instance = entry.runtime_data
-    with patch.object(instance, "connect", AsyncMock(return_value=True)) as connect:
+    with patch.object(instance, "connect", AsyncMock(return_value=True)) as connect, \
+         patch.object(instance, "read_schedules", AsyncMock(return_value=[])):
         await hass.services.async_call(
             DOMAIN, "update_status", {"device_id": device.id}, blocking=True
         )
@@ -681,9 +794,11 @@ async def test_update_status_button(hass):
     instance = entry.runtime_data
     button = "button.hall_update_status"
     assert er.async_get(hass).async_get(button).entity_category is er.EntityCategory.DIAGNOSTIC
-    with patch.object(instance, "connect", AsyncMock(return_value=True)) as connect:
+    with patch.object(instance, "connect", AsyncMock(return_value=True)) as connect, \
+         patch.object(instance, "read_schedules", AsyncMock(return_value=[])) as read:
         await call(hass, "button", "press", button)
     connect.assert_awaited_once()
+    read.assert_awaited_once()
     with patch.object(instance, "connect", AsyncMock(side_effect=DeviceConnectionError("x"))):
         await expect_unconfirmed(hass, "button", "press", button, key="cannot_reach")
 
@@ -695,6 +810,7 @@ async def test_updated_last_sensor(hass):
     entry = make_entry(hass)
     await setup_entry(hass, entry)
     instance = entry.runtime_data
+    instance.schedules = []  # no startup schedule read in this test
     sensor = "sensor.hall_updated_last"
     assert hass.states.get(sensor).state == "unknown"
     assert er.async_get(hass).async_get(sensor).entity_category is er.EntityCategory.DIAGNOSTIC
@@ -704,6 +820,14 @@ async def test_updated_last_sensor(hass):
     assert state.attributes["device_class"] == "timestamp"
     from homeassistant.util import dt as dt_util
     assert dt_util.parse_datetime(state.state) == instance.last_update.replace(microsecond=0)
+
+
+async def test_stop_schedule_action(hass):
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    with patch.object(entry.runtime_data, "stop_schedule", AsyncMock()) as stop:
+        await hass.services.async_call(DOMAIN, "stop_schedule", {"schedule": "2"}, blocking=True)
+    stop.assert_awaited_once_with(2)
 
 
 async def test_status_combines_mode_and_reachability(hass):
@@ -717,8 +841,9 @@ async def test_status_combines_mode_and_reachability(hass):
     assert state.attributes["options"] == ["idle", "auto", "schedule", "disconnected"]
 
     instance.set_advertising(True)  # heard
-    instance._on_notification(C1, FRAME)  # cS 114: auto, from the app
-    await hass.async_block_till_done()
+    with patch.object(instance, "read_schedules", AsyncMock()):  # read after the first status
+        instance._on_notification(C1, FRAME)  # cS 114: auto, from the app
+        await hass.async_block_till_done()
     assert hass.states.get(sensor).state == "auto"
 
     instance.set_advertising(False)  # HA reports it gone

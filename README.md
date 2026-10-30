@@ -80,6 +80,20 @@ To check again, for example after a firmware update, use **Reconfigure** on
 the integration entry. Setup and Reconfigure show each step as it runs.
 Devices added with an older version use the defaults until reconfigured.
 
+## Schedules
+
+The device runs up to 10 schedules on its own: days, a start and end time
+on the same day, and an interval of 10, 20 or 40 minutes. The end is rounded
+down to a whole interval.
+
+- **Schedules** sensor: the device's list, as attributes.
+- Actions: **Add schedule**, **Remove schedule** (by its number in that
+  list), **Set schedules**, **Clear schedules**, and **Skip schedule run**
+  (stops today's run; it runs again in its next window).
+- For a window across midnight, add two schedules.
+- The Godrej app doesn't read schedules from the device: a change made in
+  the app replaces any added here. Manage them from one place.
+
 ## Command confirmation
 
 Every command (Spray now, Spray: auto, Reset refill level) waits

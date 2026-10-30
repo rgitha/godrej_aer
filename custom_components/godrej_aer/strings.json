@@ -46,7 +46,63 @@
   "services": {
     "update_status": {
       "name": "Update status",
-      "description": "Connects to the Godrej Aer Smart Matic device and refreshes its status. Bypasses the automatic retry cooldown. If no target is given, every configured device is updated."
+      "description": "Connects to the Godrej Aer Smart Matic device and refreshes its status and schedules. Bypasses the automatic retry cooldown. If no target is given, every configured device is updated."
+    },
+    "set_schedules": {
+      "name": "Set schedules",
+      "description": "Replaces all of the device's own spray schedules (up to 10). Each needs days, start, end and interval (10, 20 or 40 minutes). The device keeps running them without Home Assistant.",
+      "fields": {
+        "schedules": {
+          "name": "Schedules",
+          "description": "List of schedules, each with days (mon to sun, or daily), start and end (HH:MM, same day) and interval."
+        }
+      }
+    },
+    "add_schedule": {
+      "name": "Add schedule",
+      "description": "Adds one schedule to the device's own schedules.",
+      "fields": {
+        "days": {
+          "name": "Days",
+          "description": "Days the schedule runs."
+        },
+        "start": {
+          "name": "Start",
+          "description": "Time of the first spray."
+        },
+        "end": {
+          "name": "End",
+          "description": "End of the window, on the same day. Rounded down to a whole interval."
+        },
+        "interval": {
+          "name": "Interval",
+          "description": "Minutes between sprays."
+        }
+      }
+    },
+    "remove_schedule": {
+      "name": "Remove schedule",
+      "description": "Removes one of the device's schedules, by its number in the Schedules sensor's list.",
+      "fields": {
+        "number": {
+          "name": "Number",
+          "description": "Schedule number, starting at 1."
+        }
+      }
+    },
+    "clear_schedules": {
+      "name": "Clear schedules",
+      "description": "Removes all of the device's own schedules."
+    },
+    "stop_schedule": {
+      "name": "Skip schedule run",
+      "description": "Skips the rest of a schedule's run today; manual control works again afterwards. The schedule runs as usual in its next window.",
+      "fields": {
+        "schedule": {
+          "name": "Schedule",
+          "description": "current (the one running now), all, or a number from the Schedules sensor's list."
+        }
+      }
     }
   },
   "entity": {
@@ -89,7 +145,7 @@
       "message": "Auto mode is running. Stop it to use Identify."
     },
     "schedule_running": {
-      "message": "A schedule is running. Wait for it to end to use Identify."
+      "message": "A schedule is running. Skip it or wait for it to end to use Identify."
     }
   }
 }

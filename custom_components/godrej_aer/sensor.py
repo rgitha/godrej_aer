@@ -23,7 +23,7 @@ from homeassistant.helpers.entity import DeviceInfo
 
 from .entity import async_device_device_info_fn
 from .godrej import SmartMatic, DeviceStatus
-from .godrej.events import DEVICE_REACHABILITY, DEVICE_STATUS_UPDATE
+from .godrej.events import DEVICE_REACHABILITY, DEVICE_SCHEDULES_UPDATE, DEVICE_STATUS_UPDATE
 
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
@@ -43,6 +43,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             "Channel: reply", instance.reply_char,
         ),
         SmartMaticSignalStrengthSensor(instance, config_entry),
+        SmartMaticSchedulesSensor(instance, config_entry),
         SmartMaticUpdatedLastSensor(instance, config_entry),
     ])
 
@@ -271,6 +272,53 @@ class SmartMaticSignalStrengthSensor(SensorEntity):
         }
         self._last_write = time.monotonic()
 
+
+
+class SmartMaticSchedulesSensor(SensorEntity):
+    """How many schedules the device holds, with the list as attributes.
+
+    Read back from the device: once after startup, and after every change.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Schedules"
+    _attr_icon = "mdi:calendar-clock"
+    _attr_should_poll = False
+
+    def __init__(self, instance: SmartMatic, config_entry: ConfigEntry):
+        self._instance = instance
+        self._config_entry = config_entry
+        self._attr_unique_id = f"{config_entry.entry_id}_schedules"
+        self._update_from(instance.schedules)
+
+    def _update_from(self, schedules) -> None:
+        if schedules is None:
+            self._attr_native_value = None
+            self._attr_extra_state_attributes = {}
+            return
+        self._attr_native_value = len(schedules)
+        self._attr_extra_state_attributes = {
+            "schedules": [
+                {"number": i, **schedule.as_dict()}
+                for i, schedule in enumerate(schedules, start=1)
+            ]
+        }
+
+    async def async_added_to_hass(self) -> None:
+        self._instance.eventbus.add_listener(DEVICE_SCHEDULES_UPDATE, self._on_update)
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._instance.eventbus.remove_listener(DEVICE_SCHEDULES_UPDATE, self._on_update)
+
+    async def _on_update(self, _instance) -> None:
+        self._update_from(self._instance.schedules)
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return async_device_device_info_fn(
+            self._instance, self._config_entry.data[CONF_NAME]
+        )
 
 
 class SmartMaticUpdatedLastSensor(SensorEntity):

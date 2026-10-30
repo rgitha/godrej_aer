@@ -115,6 +115,7 @@ class FakeDevice:
         self.subscribe_attempts = []
         self.broken_notify = set()
         self.writes = []
+        self.stored_schedules = []  # 5-byte entries, as the device holds them
 
     def make_client(self, disconnected_callback):
         return FakeClient(self, disconnected_callback)
@@ -150,11 +151,29 @@ class FakeDevice:
                         bytes.fromhex("626d4e18") + bytes([message["mN"]]), 1,
                     )
                 self._notify(self.reply_char, frame, self.reply_delay)
+        elif mt == 109 and self.ack is not None:
+            self._notify(self.reply_char, schedule_reply(self.stored_schedules))
         elif self.ack is not None:
+            if mt == 108:
+                self.stored_schedules = []
+            elif mt == 103:
+                self.stored_schedules = [bytes(e["s"]) for e in message["S"]]
             self._notify(
                 self.reply_char,
                 gm.encode_message(mT=mt + 50, mN=mt + 50, ack=self.ack),
             )
+
+
+def schedule_reply(entries):
+    """The device's answer to "retrieve schedules" (109 -> 159)."""
+    out = bytearray([0xBF])
+    for key, value in (("mT", 159), ("mN", 159), ("ack", 200)):
+        out += gm._cbor_key(key) + gm._cbor_uint(value)
+    out += gm._cbor_key("S") + bytes([0x9F])
+    for entry in entries:
+        out += bytes([0xBF]) + gm._cbor_key("s") + bytes([0x40 | len(entry)]) + entry + bytes([0xFF])
+    out += bytes([0xFF, 0xFF])
+    return bytes(out)
 
 
 class FakeClient:
@@ -927,6 +946,127 @@ async def test_normal_connection_does_not_walk_the_characteristics(monkeypatch):
     assert service.walks == 0
     assert device.subscribe_attempts == [C1]
     assert matic.device_status.is_valid
+
+
+# --- the device's own schedules ---------------------------------------------
+
+from datetime import time as dtime  # noqa: E402
+
+from godrej.schedule import Schedule, ScheduleError  # noqa: E402
+
+
+def sched(days="daily", start="08:00", end="22:30", interval=40):
+    h1, m1 = map(int, start.split(":"))
+    h2, m2 = map(int, end.split(":"))
+    return Schedule.create(days, dtime(h1, m1), dtime(h2, m2), interval)
+
+
+def test_schedule_bytes_match_the_app():
+    s = sched()  # daily 08:00-22:30 every 40 min
+    assert s.to_bytes() == bytes([0x7F, 8, 0, 21, 40])  # 870 min // 40 = 21 sprays
+    assert f"{s.end:%H:%M}" == "22:00"  # rounded down to a whole interval
+    weekdays = sched(["mon", "tue", "wed", "thu", "fri"], "07:00", "14:00", 10)
+    assert weekdays.to_bytes() == bytes([0b1111100, 7, 0, 42, 10])
+    assert Schedule.from_bytes(weekdays.to_bytes()) == weekdays
+    assert sched(["sun", "Sat"]).days == ("sat", "sun")
+
+
+def test_set_schedules_message_matches_the_app():
+    assert gm.encode_schedules([sched()]) == bytes.fromhex(
+        "bf626d541867626d4e18996153"  # {mT: 103, mN: 153, S:
+        "9fbf6173457f08001528ff"      #   [{s: h'7F 08 00 15 28'}
+        "ffff"                        #   ]}
+    )
+
+
+@pytest.mark.parametrize("make, message", [
+    (lambda: sched(start="22:00", end="08:00"), "later than the start"),
+    (lambda: sched(start="08:00", end="08:15", interval=20), "shorter than one"),
+    (lambda: sched(interval=15), "Interval must be"),
+    (lambda: sched(days=["someday"]), "Unknown day"),
+    (lambda: sched(days=[]), "at least one day"),
+])
+def test_impossible_schedules_are_refused(make, message):
+    with pytest.raises(ScheduleError, match=message):
+        make()
+
+
+def test_lists_the_device_cannot_hold_are_refused():
+    with pytest.raises(ScheduleError, match="overlap"):
+        gm.validate_schedules([sched("mon", "08:00", "12:00"), sched("daily", "11:00", "13:00")])
+    gm.validate_schedules([sched("mon", "08:00", "12:00"), sched("tue", "11:00", "13:00")])
+    many = [sched("daily", f"{h:02d}:00", f"{h:02d}:40", 40) for h in range(11)]
+    with pytest.raises(ScheduleError, match="at most 10"):
+        gm.validate_schedules(many)
+
+
+def schedule_writes(device):
+    return [(uuid, cbor.loads(p)["mT"]) for uuid, p in device.writes
+            if cbor.loads(p)["mT"] in (103, 108, 109)]
+
+
+async def test_set_schedules_replaces_the_list_like_the_app(monkeypatch):
+    monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    events = []
+    matic.eventbus.add_listener(gm.DEVICE_SCHEDULES_UPDATE, AsyncMockRecorder(events))
+
+    wanted = [sched(["mon", "tue"], "07:00", "14:00", 10), sched("daily", "16:00", "23:00", 20)]
+    result = await matic.set_schedules(wanted)
+    assert result == wanted and matic.schedules == wanted
+    # Remove all, upload on 6e400004 (as the app does), read back.
+    assert schedule_writes(device) == [(C2, 108), (C4, 103), (C2, 109)]
+    assert device.stored_schedules == [s.to_bytes() for s in wanted]
+    await asyncio.sleep(0)
+    assert events
+
+
+async def test_clearing_schedules_skips_the_upload(monkeypatch):
+    monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    device.stored_schedules = [sched().to_bytes()]
+    matic = attach(monkeypatch, device)
+
+    assert await matic.set_schedules([]) == []
+    assert [mt for _, mt in schedule_writes(device)] == [108, 109]
+    assert device.stored_schedules == []
+
+
+async def test_add_and_remove_work_on_what_the_device_holds(monkeypatch):
+    monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    first = sched("mon", "08:00", "10:00", 20)
+    device.stored_schedules = [first.to_bytes()]  # e.g. set up in the app
+    matic = attach(monkeypatch, device)
+
+    second = sched("tue", "08:00", "10:00", 20)
+    assert await matic.add_schedule(second) == [first, second]
+    assert await matic.remove_schedule(1) == [second]
+    with pytest.raises(ScheduleError, match="no schedule 5"):
+        await matic.remove_schedule(5)
+
+
+async def test_rejected_upload_raises(monkeypatch):
+    monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, ack=500)
+    matic = attach(monkeypatch, device)
+    with pytest.raises(CommandNotConfirmed):
+        await matic.set_schedules([sched()])
+
+
+@pytest.mark.parametrize("target, mt, key, code", [
+    ("current", 106, "sS", 128), ("all", 106, "sS", 255), (3, 106, "sS", 2),
+])
+async def test_stop_schedule_message(monkeypatch, target, mt, key, code):
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    await matic.stop_schedule(target)
+    await matic._refresh_task
+    sent = cbor.loads(device.writes[0][1])
+    assert (sent["mT"], sent[key]) == (mt, code)
+    assert sent[key] is not True  # a number, unlike "auto spray off"
+
 
 
 async def test_identify_lights_then_clears_while_idle(monkeypatch):

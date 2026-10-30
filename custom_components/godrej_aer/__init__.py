@@ -14,6 +14,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 from .const import CONF_COMMAND_CHAR, CONF_REPLY_CHAR
 from .const import DOMAIN
 from .godrej import SmartMatic
+from .godrej.events import DEVICE_STATUS_UPDATE
 from .services import async_setup_services, async_unload_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,6 +56,27 @@ async def async_setup_entry(
             retry_timer = None
 
     entry.async_on_unload(_cancel_retry_timer)
+
+    async def _read_schedules():
+        _LOGGER.debug("Reading the schedules of %s after startup", mac)
+        try:
+            await instance.read_schedules()
+        except Exception:
+            _LOGGER.debug("Could not read schedules from %s", mac, exc_info=True)
+
+    async def _on_first_status(_status) -> None:
+        # Read the device's own schedules once, after the first status
+        # shows it is reachable; later changes read them back themselves.
+        instance.eventbus.remove_listener(DEVICE_STATUS_UPDATE, _on_first_status)
+        if instance.schedules is None:
+            entry.async_create_background_task(
+                hass, _read_schedules(), f"godrej_aer schedules {mac}"
+            )
+
+    instance.eventbus.add_listener(DEVICE_STATUS_UPDATE, _on_first_status)
+    entry.async_on_unload(
+        lambda: instance.eventbus.remove_listener(DEVICE_STATUS_UPDATE, _on_first_status)
+    )
 
     async def _connect_if_needed():
         nonlocal retry_timer

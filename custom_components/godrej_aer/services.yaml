@@ -2,10 +2,125 @@ update_status:
   name: Update status
   description: >-
     Connect to the Godrej Aer Smart Matic device and refresh its status
-    (battery voltage and connection state). Bypasses the automatic retry
+    and its schedules. Bypasses the automatic retry
     cooldown. If no target is given, every configured device is updated.
   target:
     device:
       integration: godrej_aer
     entity:
       integration: godrej_aer
+
+set_schedules:
+  target:
+    device:
+      integration: godrej_aer
+    entity:
+      integration: godrej_aer
+  fields:
+    schedules:
+      required: true
+      example: >-
+        [{"days": ["mon", "tue", "wed", "thu", "fri"], "start": "08:00",
+        "end": "22:30", "interval": 40}]
+      selector:
+        object:
+
+add_schedule:
+  target:
+    device:
+      integration: godrej_aer
+    entity:
+      integration: godrej_aer
+  fields:
+    days:
+      required: true
+      default: [mon, tue, wed, thu, fri, sat, sun]
+      selector:
+        select:
+          multiple: true
+          options:
+            - label: Monday
+              value: mon
+            - label: Tuesday
+              value: tue
+            - label: Wednesday
+              value: wed
+            - label: Thursday
+              value: thu
+            - label: Friday
+              value: fri
+            - label: Saturday
+              value: sat
+            - label: Sunday
+              value: sun
+    start:
+      required: true
+      example: "08:00"
+      selector:
+        time:
+    end:
+      required: true
+      example: "22:30"
+      selector:
+        time:
+    interval:
+      required: true
+      default: 20
+      selector:
+        select:
+          options:
+            - label: 10 minutes
+              value: "10"
+            - label: 20 minutes
+              value: "20"
+            - label: 40 minutes
+              value: "40"
+
+remove_schedule:
+  target:
+    device:
+      integration: godrej_aer
+    entity:
+      integration: godrej_aer
+  fields:
+    number:
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 10
+          mode: box
+
+clear_schedules:
+  target:
+    device:
+      integration: godrej_aer
+    entity:
+      integration: godrej_aer
+
+stop_schedule:
+  target:
+    device:
+      integration: godrej_aer
+    entity:
+      integration: godrej_aer
+  fields:
+    schedule:
+      required: true
+      default: current
+      selector:
+        select:
+          options:
+            - current
+            - all
+            - "1"
+            - "2"
+            - "3"
+            - "4"
+            - "5"
+            - "6"
+            - "7"
+            - "8"
+            - "9"
+            - "10"

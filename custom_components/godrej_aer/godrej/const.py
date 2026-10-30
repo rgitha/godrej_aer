@@ -16,6 +16,8 @@ COMMAND_CHAR_CANDIDATES = (
     "6e400004-b5a3-f393-e0a9-e50e24dcca9e",
 )
 DEFAULT_COMMAND_CHAR = COMMAND_CHAR_CANDIDATES[0]
+# The official app writes schedule uploads (message type 103) here only.
+SCHEDULE_CHAR = COMMAND_CHAR_CANDIDATES[2]
 DEFAULT_REPLY_CHAR = NOTIFY_CHAR
 
 # Seconds to stay connected after a successful exchange before dropping the
@@ -29,6 +31,10 @@ STATUS_TIMEOUT = 5
 PROBE_TIMEOUT = 8
 # Total time detection may take (defaults check plus fallback probing).
 DETECT_TIMEOUT = 60
+# Schedules: seconds to wait for their replies, and the pause the app
+# leaves between "remove all" and the upload that follows it.
+SCHEDULE_REPLY_TIMEOUT = 5
+SCHEDULE_PAUSE = 3
 # Seconds to wait for a command's acknowledgement, counted from its write.
 # Fresh links answer in ~0.1 s; on a link left open for a few seconds the
 # device has been seen to take just over 3 s.

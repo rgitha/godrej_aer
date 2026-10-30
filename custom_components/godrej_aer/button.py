@@ -72,7 +72,7 @@ class SmartMaticResetRefillButton(SmartMaticButton):
 
 
 class SmartMaticUpdateStatusButton(SmartMaticButton):
-    """Read the status now, like the Update status action."""
+    """Read the status and schedules now, like the Update status action."""
 
     _key = "update_status"
     _attr_name = "Update status"
@@ -81,7 +81,11 @@ class SmartMaticUpdateStatusButton(SmartMaticButton):
 
     async def async_press(self) -> None:
         _LOGGER.debug("%s: Update status pressed", self._config_entry.data[CONF_NAME])
-        await async_send_command(self._instance.connect(purpose="update status"))
+        await async_send_command(self._update())
+
+    async def _update(self) -> None:
+        await self._instance.connect(purpose="update status")
+        await self._instance.read_schedules()
 
 
 class SmartMaticIdentifyButton(SmartMaticButton):
