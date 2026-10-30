@@ -8,18 +8,22 @@ from homeassistant.const import Platform, CONF_MAC
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth.match import ADDRESS, BluetoothCallbackMatcher
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
 from .const import CONF_COMMAND_CHAR, CONF_REPLY_CHAR
+from .const import DOMAIN
 from .godrej import SmartMatic
 from .services import async_setup_services, async_unload_services
 
 _LOGGER = logging.getLogger(__name__)
+# Replaced by the "Spray: auto" select (Off / every 10, 20 or 40 min).
+_REPLACED_ENTITIES = (("switch", "auto_spray"), ("select", "spray_interval"))
+
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.BUTTON,
     Platform.BINARY_SENSOR,
-    Platform.SWITCH,
     Platform.SELECT,
 ]
 
@@ -57,8 +61,8 @@ async def async_setup_entry(
         if bluetooth.async_address_present(hass, mac, connectable=True):
             try:
                 await instance.connect_if_needed()
-            except Exception:
-                _LOGGER.debug("Background connect attempt failed for %s", mac, exc_info=True)
+            except Exception as e:
+                _LOGGER.debug("Background status read for %s failed: %s", mac, e)
                 # Retry exactly when the backoff ends, not at the next
                 # periodic tick (up to a minute later).
                 delay = instance.retry_delay
@@ -70,6 +74,7 @@ async def async_setup_entry(
     def _retry_now(_now) -> None:
         nonlocal retry_timer
         retry_timer = None
+        _LOGGER.debug("Retrying %s after the backoff", mac)
         _schedule_connect()
 
     @callback
@@ -85,7 +90,6 @@ async def async_setup_entry(
         change: bluetooth.BluetoothChange
     ):
         """Subscribe to bluetooth changes."""
-        _LOGGER.debug("New service_info: %s", service_info)
         instance.set_advertising(True)
         _schedule_connect()
 
@@ -109,6 +113,12 @@ async def async_setup_entry(
             hass, _async_device_unavailable, mac, connectable=True
         )
     )
+
+    registry = er.async_get(hass)
+    for platform, key in _REPLACED_ENTITIES:
+        old = registry.async_get_entity_id(platform, DOMAIN, f"{entry.entry_id}_{key}")
+        if old:
+            registry.async_remove(old)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))

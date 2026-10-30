@@ -9,7 +9,7 @@ from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
 
 from .const import DOMAIN
 from .godrej import SmartMatic
-from .godrej.exception import BatteryTooLow, CommandNotConfirmed, ConnectionError
+from .godrej.exception import BatteryTooLow, CommandNotConfirmed, ConnectionError, NotIdle
 
 
 class AcceptedButFlat(HomeAssistantError):
@@ -27,6 +27,11 @@ async def async_send_command(command: Awaitable[None]) -> None:
         raise AcceptedButFlat(
             translation_domain=DOMAIN,
             translation_key="battery_too_low",
+        ) from err
+    except NotIdle as err:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="schedule_running" if err.schedule else "auto_running",
         ) from err
     except ConnectionError as err:
         raise HomeAssistantError(

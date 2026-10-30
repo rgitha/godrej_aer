@@ -23,12 +23,13 @@ from homeassistant.helpers.entity import DeviceInfo
 
 from .entity import async_device_device_info_fn
 from .godrej import SmartMatic, DeviceStatus
-from .godrej.events import DEVICE_STATUS_UPDATE
+from .godrej.events import DEVICE_REACHABILITY, DEVICE_STATUS_UPDATE
 
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     instance: SmartMatic = config_entry.runtime_data
     async_add_entities([
+        SmartMaticStatusSensor(instance, config_entry),
         SmartMaticBatterySensor(instance, config_entry),
         SmartMaticBatteryVoltageSensor(instance, config_entry),
         SmartMaticRefillLevelSensor(instance, config_entry),
@@ -42,6 +43,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             "Channel: reply", instance.reply_char,
         ),
         SmartMaticSignalStrengthSensor(instance, config_entry),
+        SmartMaticUpdatedLastSensor(instance, config_entry),
     ])
 
 
@@ -78,6 +80,63 @@ class SmartMaticSensor(SensorEntity):
     async def on_status_update(self, device_status: DeviceStatus):
         self._attr_native_value = self._value_fn(device_status)
         self.async_write_ha_state()
+
+
+class SmartMaticStatusSensor(SensorEntity):
+    """One status: Idle, Auto, Schedule or Disconnected.
+
+    Disconnected when Connection status is Unreachable (not heard, or the
+    last exchange failed); otherwise the mode from the last status read
+    (see Updated last). Unknown until something is heard or read.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Status"
+    _attr_translation_key = "device_status"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["idle", "auto", "schedule", "disconnected"]
+
+    def __init__(self, instance: SmartMatic, config_entry: ConfigEntry):
+        self._instance = instance
+        self._config_entry = config_entry
+        self._attr_unique_id = f"{config_entry.entry_id}_device_status"
+
+    @property
+    def native_value(self) -> str | None:
+        if self._instance.reachable is False:
+            return "disconnected"
+        status = self._instance.device_status
+        if status is None or status.current_status is None:
+            return None
+        if not status.is_spraying:
+            return "idle"
+        return "schedule" if status.spray_source == "schedule" else "auto"
+
+    @property
+    def icon(self) -> str:
+        return {
+            "idle": "mdi:spray",
+            "auto": "mdi:timer-sync-outline",
+            "schedule": "mdi:calendar-clock",
+            "disconnected": "mdi:bluetooth-off",
+        }.get(self.native_value, "mdi:help-circle-outline")
+
+    async def async_added_to_hass(self) -> None:
+        for event in (DEVICE_STATUS_UPDATE, DEVICE_REACHABILITY):
+            self._instance.eventbus.add_listener(event, self._on_event)
+
+    async def async_will_remove_from_hass(self) -> None:
+        for event in (DEVICE_STATUS_UPDATE, DEVICE_REACHABILITY):
+            self._instance.eventbus.remove_listener(event, self._on_event)
+
+    async def _on_event(self, _data) -> None:
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return async_device_device_info_fn(
+            self._instance, self._config_entry.data[CONF_NAME]
+        )
 
 
 class SmartMaticBatterySensor(SmartMaticSensor):
@@ -212,3 +271,39 @@ class SmartMaticSignalStrengthSensor(SensorEntity):
         }
         self._last_write = time.monotonic()
 
+
+
+class SmartMaticUpdatedLastSensor(SensorEntity):
+    """When the last status read succeeded.
+
+    Named to sort next to the Update status button on the device page.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Updated last"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_should_poll = False
+
+    def __init__(self, instance: SmartMatic, config_entry: ConfigEntry):
+        self._instance = instance
+        self._config_entry = config_entry
+        # Not "last_update": that was an older entity, removed on upgrade.
+        self._attr_unique_id = f"{config_entry.entry_id}_updated_last"
+        self._attr_native_value = instance.last_update
+
+    async def async_added_to_hass(self) -> None:
+        self._instance.eventbus.add_listener(DEVICE_STATUS_UPDATE, self._on_update)
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._instance.eventbus.remove_listener(DEVICE_STATUS_UPDATE, self._on_update)
+
+    async def _on_update(self, _status) -> None:
+        self._attr_native_value = self._instance.last_update
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return async_device_device_info_fn(
+            self._instance, self._config_entry.data[CONF_NAME]
+        )

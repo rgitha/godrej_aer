@@ -24,6 +24,10 @@ _INTERVAL_BY_STATUS = {
     114: 40, 123: 40, 133: 40,
 }
 
+# What started auto-spraying, by the tens digit of cS: 11x from the app (or
+# Home Assistant), 12x a schedule stored on the device, 13x its button.
+_SOURCE_BY_STATUS_GROUP = {11: "app", 12: "schedule", 13: "button"}
+
 # sC sub-array -> counter names, in array order.
 _COUNTER_KEYS = {
     "sn": ("spray_now_0", "spray_now_10", "spray_now_20", "spray_now_40"),
@@ -170,6 +174,34 @@ class DeviceStatus:
     def spray_interval(self) -> int:
         """Auto-spray interval in minutes (0 when idle)."""
         return _INTERVAL_BY_STATUS.get(self.current_status, 0)
+
+    @property
+    def spray_source(self) -> str | None:
+        """What started auto-spraying: "app", "schedule" or "button"."""
+        if not self.is_spraying:
+            return None
+        return _SOURCE_BY_STATUS_GROUP.get(self.current_status // 10)
+
+    def describe(self) -> str:
+        """A one-line summary for the debug log."""
+        if self.is_spraying:
+            mode = f"auto every {self.spray_interval} min, started by {self.spray_source}"
+        else:
+            mode = "auto off"
+        c = self.spray_counts
+
+        def group(prefix):
+            return "/".join(str(c.get(f"{prefix}_{m}", "?")) for m in (10, 20, 40))
+
+        counts = (
+            f"Total {self.total_spray_count}: now {c.get('spray_now_0', '?')}; "
+            f"auto {group('spray_now')}; scheduled {group('schedule')}; "
+            f"button {group('button')} (each 10/20/40 min)"
+        ) if c else "no counters"
+        return (
+            f"{mode} (cS {self.current_status}); battery {self.battery_mv} mV "
+            f"({self.battery_percent}%); Sprays: {counts}; firmware {self.firmware_version}"
+        )
 
     @property
     def is_spraying(self) -> bool:

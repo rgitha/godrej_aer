@@ -126,3 +126,23 @@ def test_battery_percent_follows_the_alkaline_curve(mv, percent):
     status = DeviceStatus(FRAME_308_IN)
     status.battery_mv = mv
     assert status.battery_percent == percent
+
+
+SCHEDULED_FRAME = bytes.fromhex(  # fw 3.0.8-IN while a 10-min schedule ran
+    "bf626d54189d626d4e189d6361636b18c86262561a00000c0c62665668332e302e382d49"
+    "4e6263531879627343a362736e8419009a1900081900001900056273638319000219000019"
+    "000062626e8319000019000019000062735666313031313131ff"
+)
+
+
+def test_status_summary_names_what_started_spraying():
+    status = DeviceStatus(SCHEDULED_FRAME)
+    assert status.spray_source == "schedule" and status.spray_interval == 10
+    assert status.describe() == (
+        "auto every 10 min, started by schedule (cS 121); battery 3084 mV (99%); "
+        "Sprays: Total 169: now 154; auto 8/0/5; scheduled 2/0/0; button 0/0/0 "
+        "(each 10/20/40 min); firmware 3.0.8-IN"
+    )
+    for code, source in ((113, "app"), (133, "button"), (111, None), (0, None)):
+        status.current_status = code
+        assert status.spray_source == source

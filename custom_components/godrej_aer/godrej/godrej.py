@@ -37,7 +37,8 @@ from .exception import (
     BatteryTooLow,
     CommandNotConfirmed,
     InvalidDeviceError,
-    ConnectionError
+    ConnectionError,
+    NotIdle,
 )
 from .events import (
     DEVICE_CONNECT,
@@ -61,6 +62,7 @@ _ACK_LABELS = {
     154: "Spray command",
     155: "Refill reset",
     156: "Auto-spray stop",
+    163: "LED test",
 }
 # Detection tags each probe with its own message number (mN), so a late
 # reply can be matched to the probe it answers.
@@ -128,6 +130,11 @@ STOP_SPRAY_MSG = encode_message(mT=106, mN=156, sS=True)
 # {"mT": 105, "mN": 155, "rR": true} -> mark the cartridge as refilled
 RESET_REFILL_MSG = encode_message(mT=105, mN=155, rR=True)
 
+# {"mT": 113, "mN": 163}: "test LED", lights all three interval lights.
+# They stay lit until the next mode command; "auto off" clears them.
+LED_TEST_MSG = encode_message(mT=113, mN=163)
+# Seconds the lights stay on for Identify.
+IDENTIFY_SECONDS = 3
 
 def encode_set_time(now: datetime | None = None) -> bytes:
     """Build the ``mT=102`` set-time message the way the official app does.
@@ -300,7 +307,7 @@ class SmartMatic:
             await asyncio.sleep(SET_TIME_PACING)
             async with self._connect_lock:
                 self._device_status_event.clear()
-                _LOGGER.debug(">> %s: %s (fetch status)", self._write_char, FETCH_STATUS_MSG.hex())
+                _LOGGER.debug("Asking %s for its status", self.mac)
                 await self._write_message(FETCH_STATUS_MSG)
             await self._await_status_reply(status_timeout)
         except BaseException as error:
@@ -577,6 +584,7 @@ class SmartMatic:
             )
             return False
 
+        _LOGGER.debug("Background status read for %s", self.mac)
         try:
             await self.connect()
         except Exception as e:
@@ -747,7 +755,7 @@ class SmartMatic:
             return
 
         char = char or self._write_char
-        _LOGGER.debug(">> %s: %s (set time)", char, payload.hex())
+        _LOGGER.debug("Setting the clock on %s", self.mac)
         try:
             await self._write_message(payload, char=char)
         except Exception as e:
@@ -778,7 +786,7 @@ class SmartMatic:
         """Send fetch-status to ``char``; True if a status reply arrived."""
         self._device_status_event.clear()
 
-        _LOGGER.debug(">> %s: %s (fetch status)", char, message.hex())
+        _LOGGER.debug("Asking %s for its status via %s", self.mac, char[:8])
         try:
             await self._write_message(message, char=char)
         except Exception as e:
@@ -879,7 +887,10 @@ class SmartMatic:
             f"No status reply from {self.mac} on any of {', '.join(candidates)}"
         )
 
-    async def _write_action(self, payload: bytes, reply_mt: int):
+    async def _write_action(
+        self, payload: bytes, reply_mt: int, *, char: str | None = None,
+        timeout: float = ACK_TIMEOUT, refresh: bool = True,
+    ) -> DeviceStatus:
         """Send a command and wait for the device to acknowledge it.
 
         Subscribes first (one quick call) so the acknowledgement, a reply of
@@ -900,9 +911,14 @@ class SmartMatic:
                     raise ConnectionError(
                         f"{self.mac} could not be reached for an earlier command"
                     )
-                await self._send_command(payload, reply_mt)
+                return await self._send_command(
+                    payload, reply_mt, char=char, timeout=timeout, refresh=refresh
+                )
 
-    async def _send_command(self, payload: bytes, reply_mt: int):
+    async def _send_command(
+        self, payload: bytes, reply_mt: int, *, char: str | None = None,
+        timeout: float = ACK_TIMEOUT, refresh: bool = True,
+    ) -> DeviceStatus:
         self._commands_sent += 1
         try:
             await self._ensure_connected()
@@ -912,21 +928,22 @@ class SmartMatic:
             raise
 
         label = _ACK_LABELS.get(reply_mt, f"Command {reply_mt - 50}")
-        ack = None
+        ack = reply = None
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         self._ack_waiters[reply_mt] = future
         try:
-            char = self._write_char
-            _LOGGER.debug(">> %s: %s", char, payload.hex())
+            char = char or self._write_char
+            _LOGGER.debug("Sent to %s via %s; waiting for its reply", self.mac, char[:8])
             await self._write_message(payload, char=char)
             sent_at = loop.time()
-            ack = await asyncio.wait_for(future, ACK_TIMEOUT)
+            reply = await asyncio.wait_for(future, timeout)
+            ack = reply.acknowledgement
             _LOGGER.debug("%s answered in %.2f s", label, loop.time() - sent_at)
         except asyncio.TimeoutError:
             _LOGGER.warning(
                 "%s was not acknowledged by %s within %s s",
-                label, self.mac, ACK_TIMEOUT,
+                label, self.mac, timeout,
             )
         except Exception as e:
             _LOGGER.warning("%s could not be sent to %s: %s", label, self.mac, e)
@@ -934,9 +951,13 @@ class SmartMatic:
             if self._ack_waiters.get(reply_mt) is future:
                 del self._ack_waiters[reply_mt]
 
-        self._schedule_refresh()
+        if refresh:
+            self._schedule_refresh()
+        else:
+            await self.delayed_disconnect()
         if ack != ACK_OK:
             raise CommandNotConfirmed(f"{label} not confirmed by {self.mac} (ack={ack})")
+        return reply
 
     async def _write_message(self, payload: bytes, *, char: str | None = None):
         """Use a stable client reference and never retry an action write."""
@@ -960,8 +981,9 @@ class SmartMatic:
 
         async def _refresh():
             async with self._connect_lock:
+                _LOGGER.debug("Reading the status of %s back after the command", self.mac)
                 try:
-                    await self._ensure_connected()
+                    await self._ensure_connected(purpose="read-back")
                     await self._ensure_subscribed()
                     await self.get_device_status()
                 except asyncio.CancelledError:
@@ -977,7 +999,7 @@ class SmartMatic:
 
     async def spray_now(self):
         """Spray once, now."""
-        _LOGGER.debug("Spray now on %s...", self.mac)
+        _LOGGER.debug("Sending spray now command to %s", self.mac)
         await self._write_action(SPRAY_NOW_MSG, 154)
         self._raise_if_battery_too_low()
 
@@ -988,7 +1010,7 @@ class SmartMatic:
                 f"Unsupported spray interval {interval}; "
                 f"expected one of {SPRAY_INTERVALS}"
             )
-        _LOGGER.debug("Set spray interval %s min on %s...", interval, self.mac)
+        _LOGGER.debug("Sending auto spray every %s min command to %s", interval, self.mac)
         await self._write_action(spray_now_msg(interval), 154)
         self._raise_if_battery_too_low()
 
@@ -1006,7 +1028,7 @@ class SmartMatic:
 
     async def stop_spray(self):
         """Stop auto-spraying."""
-        _LOGGER.debug("Stop auto-spray on %s...", self.mac)
+        _LOGGER.debug("Sending auto spray off command to %s", self.mac)
         await self._write_action(STOP_SPRAY_MSG, 156)
 
     async def set_auto_spray(self, enabled: bool, interval: int | None = None):
@@ -1016,12 +1038,33 @@ class SmartMatic:
         else:
             await self.stop_spray()
 
+    async def identify(self):
+        """Light all three interval lights for a few seconds.
+
+        Only while idle: the lights stay on until a mode command, and the
+        only one that clears them without side effects is "auto off" while
+        already off (re-sending an interval restarts auto mode with a
+        spray; "auto off" would stop auto mode or pause a schedule run).
+        Reads a fresh status first to check.
+        """
+        await self.connect(purpose="identify")
+        status = self.device_status
+        if status is None or status.current_status is None or status.is_spraying:
+            raise NotIdle(
+                f"{self.mac} is not idle",
+                schedule=bool(status and status.spray_source == "schedule"),
+            )
+        _LOGGER.debug("Sending LED test to %s", self.mac)
+        await self._write_action(LED_TEST_MSG, 163, refresh=False)
+        await asyncio.sleep(IDENTIFY_SECONDS)
+        await self.stop_spray()
+
     async def reset_refill(self):
         """Tell the device its cartridge has been refilled."""
-        _LOGGER.debug("Reset refill on %s...", self.mac)
+        _LOGGER.debug("Sending refill reset command to %s", self.mac)
         await self._write_action(RESET_REFILL_MSG, 155)
 
-    async def _ensure_connected(self):
+    async def _ensure_connected(self, purpose: str = "command"):
         """Make sure the BLE link is up, without requiring a status read.
 
         The caller must hold ``self._connect_lock``. This is the path used
@@ -1034,19 +1077,18 @@ class SmartMatic:
         # mid-command; the action schedules a new one.
         self._cancel_delayed_disconnect()
         # Subscribing first lets the action catch its acknowledgement.
-        await self._open_connection(settle=ACTION_SETTLE, purpose="command")
+        await self._open_connection(settle=ACTION_SETTLE, purpose=purpose)
 
     async def _notification_handler(self, sender, data):
         self._on_notification(getattr(sender, "uuid", str(sender)), data)
 
     def _on_notification(self, uuid: str, data: bytes):
         """Buffer fragments per characteristic until a CBOR item is complete."""
-        _LOGGER.debug("<< %s (%d): %s", uuid, len(data), bytes(data).hex())
 
         now = time.monotonic()
         buf, last = self._rx_buffers.get(uuid, (bytearray(), now))
         if buf and now - last > _FRAGMENT_TIMEOUT:
-            _LOGGER.debug("Dropping stale partial frame on %s: %s", uuid, buf.hex())
+            _LOGGER.debug("Dropping a stale partial reply on %s (%d bytes)", uuid[:8], len(buf))
             buf = bytearray()
         buf.extend(data)
 
@@ -1076,6 +1118,7 @@ class SmartMatic:
             self._last_reply_char = uuid
 
         self.device_status = status
+        _LOGGER.debug("Status of %s: %s", self.mac, status.describe())
         self.last_update = dt_util.utcnow()
         self._set_exchange_ok(True)
         self._device_status_event.set()
@@ -1084,9 +1127,29 @@ class SmartMatic:
     def _handle_ack(self, message: DeviceStatus) -> None:
         """Log a command acknowledgement and hand it to a waiting action."""
         reply_mt, ack = message.message_type, message.acknowledgement
+        # A refusal comes back with another message type (seen: 157) but
+        # our message number (mN) and a non-200 code. Match it by mN to
+        # the waiting command so it fails at once instead of timing out.
+        refused_for = message.message_id
+        if (
+            reply_mt not in self._ack_waiters
+            and ack != ACK_OK
+            and refused_for in self._ack_waiters
+        ):
+            label = _ACK_LABELS.get(refused_for, f"Command {refused_for - 50}")
+            _LOGGER.warning(
+                "%s refused by %s (code %s, reply type %s)", label, self.mac, ack, reply_mt
+            )
+            future = self._ack_waiters[refused_for]
+            if not future.done():
+                future.set_result(message)
+            return
         label = _ACK_LABELS.get(reply_mt)
         if label is None:
-            _LOGGER.debug("Ignoring message type %s from %s", reply_mt, self.mac)
+            # Unknown to us: keep the raw bytes, they're the only clue.
+            _LOGGER.debug(
+                "Ignoring message type %s from %s: %s", reply_mt, self.mac, message.raw.hex()
+            )
             return
         if ack == ACK_OK:
             _LOGGER.debug("%s acknowledged by %s", label, self.mac)
@@ -1094,8 +1157,8 @@ class SmartMatic:
             _LOGGER.warning("%s rejected by %s (ack=%s)", label, self.mac, ack)
         future = self._ack_waiters.get(reply_mt)
         if future is not None and not future.done():
-            future.set_result(ack)
-        else:
+            future.set_result(message)
+        elif reply_mt != 152:  # nothing ever waits for the clock's reply
             _LOGGER.debug("%s: nothing was waiting (it came late)", label)
 
     def _on_disconnect(self, _client: BleakClient):

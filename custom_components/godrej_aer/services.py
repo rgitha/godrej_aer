@@ -62,6 +62,7 @@ def async_setup_services(hass: HomeAssistant) -> None:
 
     async def _async_update_status(call: ServiceCall) -> None:
         instances = await _async_matched_instances(hass, call)
+        _LOGGER.debug("Update status action run for %s", [i.mac for i in instances])
         if not instances:
             raise HomeAssistantError(
                 "No loaded Godrej Aer Smart Matic devices matched the service call"

@@ -6,9 +6,10 @@ This is a custom integration for Home Assistant to support Godrej Aer Smart Mati
 
 This integration currently supports the following features:
 
+- Status sensor: Idle, Auto, Schedule or Disconnected (not heard, or the last exchange failed); the mode is from the last status read (see Updated last)
 - Spray once via a `button` entity
-- Turn auto-spray on/off via a `switch` entity
-- Choose the auto-spray interval (10 / 20 / 40 minutes) via a `select` entity
+- Auto-spray mode via a `select` entity: Off, or every 10, 20 or 40 minutes (attribute `started_by`: app, schedule or button)
+- Identify (diagnostic button): lights the device's three interval lights for a few seconds. Works only while auto-spray is off and no schedule is running
 - Reset the refill level via a `button` entity (after replacing the cartridge)
 - Battery level as a percentage of what the device can use: the alkaline discharge curve, from 3.1 V (100 %) down to the device's 2.4 V cut-off (0 %); the measured voltage is a diagnostic sensor. Below 2.4 V the device still acknowledges sprays without spraying, so Spray now and Spray: auto show "Batteries are too low to spray"
 - Estimated refill level (%) and lifetime spray count sensors
@@ -81,11 +82,10 @@ Devices added with an older version use the defaults until reconfigured.
 
 ## Command confirmation
 
-Every command (Spray now, Spray: auto, Spray: interval, Reset refill level) waits
-up to 3 seconds for the device's acknowledgement. Without one, Home
-Assistant shows an error, the Spray: auto toggle and Spray: interval keep
-their previous state, and the status is read back so the entities show
-what the device is actually doing.
+Every command (Spray now, Spray: auto, Reset refill level) waits
+up to 5 seconds for the device's acknowledgement. Without one, Home
+Assistant shows an error, Spray: auto keeps its previous state, and the
+status is read back so the entities show what the device is actually doing.
 
 The channels in use and the battery voltage (both disabled by default) and the signal strength of the device's
 advertisements (with the adapter or proxy that received them) are shown as

@@ -927,3 +927,39 @@ async def test_normal_connection_does_not_walk_the_characteristics(monkeypatch):
     assert service.walks == 0
     assert device.subscribe_attempts == [C1]
     assert matic.device_status.is_valid
+
+
+async def test_identify_lights_then_clears_while_idle(monkeypatch):
+    from unittest.mock import AsyncMock
+    from godrej.devicestatus import DeviceStatus
+
+    monkeypatch.setattr(gm, "IDENTIFY_SECONDS", 0)
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    idle = DeviceStatus(gm.encode_message(mT=157, mN=157, ack=200, bV=3100, cS=0))
+
+    async def fresh_status(**_):
+        matic.device_status = idle
+    matic.connect = AsyncMock(side_effect=fresh_status)
+    await matic.identify()
+    await matic._refresh_task
+    sent = [cbor.loads(payload)["mT"] for _, payload in device.writes]
+    assert sent[:2] == [113, 106]  # LED test, then auto off to clear the lights
+
+
+async def test_identify_refuses_unless_idle(monkeypatch):
+    from unittest.mock import AsyncMock
+    from godrej.devicestatus import DeviceStatus
+    from godrej.exception import NotIdle
+
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    busy = DeviceStatus(gm.encode_message(mT=157, mN=157, ack=200, bV=3100, cS=121))
+
+    async def fresh_status(**_):
+        matic.device_status = busy
+    matic.connect = AsyncMock(side_effect=fresh_status)
+    with pytest.raises(NotIdle) as err:
+        await matic.identify()
+    assert err.value.schedule  # cS 121: started by a schedule
+    assert device.writes == []

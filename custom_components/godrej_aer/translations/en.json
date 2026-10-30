@@ -63,6 +63,16 @@
                     "off": "Unreachable"
                 }
             }
+        },
+        "sensor": {
+            "device_status": {
+                "state": {
+                    "idle": "Idle",
+                    "auto": "Auto",
+                    "schedule": "Schedule",
+                    "disconnected": "Disconnected"
+                }
+            }
         }
     },
     "exceptions": {
@@ -74,6 +84,12 @@
         },
         "battery_too_low": {
             "message": "Batteries are too low to spray. Replace them."
+        },
+        "auto_running": {
+            "message": "Auto mode is running. Stop it to use Identify."
+        },
+        "schedule_running": {
+            "message": "A schedule is running. Wait for it to end to use Identify."
         }
     }
 }
